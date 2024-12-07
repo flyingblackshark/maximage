@@ -46,7 +46,7 @@ Quant = quantizations.AqtQuantization
 # ------------------------------------------------------------------------------
 # The network: Decoder & Transformer Definitions
 # ------------------------------------------------------------------------------
-
+from vit import VITModel
 
 class DecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
@@ -272,15 +272,17 @@ class Decoder(nn.Module):
       decoder_input_tokens,
       decoder_positions,
       decoder_segment_ids=None,
+      decoder_hidden_states=None,
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
   ):
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
-
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
+    if decoder_hidden_states is not None:
+      y = jnp.concatenate(decoder_hidden_states,y,axis=1)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
@@ -455,12 +457,13 @@ class Transformer(nn.Module):
     )
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
-
+    self.vit_model = VITModel(num_classes=2048,variant="So400m/14",scan=True)
   def __call__(
       self,
       decoder_input_tokens,
       decoder_positions,
       decoder_segment_ids=None,
+      decoder_image=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
   ):
@@ -471,11 +474,15 @@ class Transformer(nn.Module):
           f"During autoregressive decoding we assume the tokens are in the active sequence"
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
-
+    if decoder_image is not None:
+      img_hidden_states,_ = self.vit_model(decoder_image)
+    else:
+      img_hidden_states = None
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
+        decoder_hidden_states=img_hidden_states,
         deterministic=not enable_dropout,
         model_mode=model_mode,
     )
